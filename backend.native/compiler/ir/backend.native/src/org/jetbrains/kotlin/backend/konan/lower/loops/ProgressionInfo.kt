@@ -2,11 +2,10 @@ package org.jetbrains.kotlin.backend.konan.lower.loops
 
 import org.jetbrains.kotlin.backend.common.lower.createIrBuilder
 import org.jetbrains.kotlin.backend.konan.Context
-import org.jetbrains.kotlin.backend.konan.irasdescriptors.fqNameSafe
 import org.jetbrains.kotlin.backend.konan.irasdescriptors.isSubtypeOf
+import org.jetbrains.kotlin.backend.konan.lower.createFunctionMatcher
 import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.builders.irCall
-import org.jetbrains.kotlin.ir.declarations.IrFunction
 import org.jetbrains.kotlin.ir.expressions.*
 import org.jetbrains.kotlin.ir.expressions.impl.IrCallImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrCompositeImpl
@@ -32,8 +31,7 @@ internal data class ProgressionInfo(
         var needLastCalculation: Boolean = false,
         val closed: Boolean = true)
 
-private fun IrConst<*>.isOne() =
-        when (kind) {
+private fun IrConst<*>.isOne() = when (kind) {
             IrConstKind.Long -> value as Long == 1L
             IrConstKind.Int -> value as Int == 1
             else -> false
@@ -52,80 +50,74 @@ internal class ProgressionInfoBuilder(val context: Context) : IrElementVisitor<P
 
     private val progressionElementClasses = symbols.integerClasses + symbols.char
 
-    private val isIndicesMatch = IrMatcher(context).apply {
+    private val indicesMatcher = createFunctionMatcher {
+
         val supportedArrays = symbols.primitiveArrays.values + symbols.array
 
-        addNameRestriction { it == FqName("kotlin.collections.indices") }
+        fqNameRestriction { it == FqName("kotlin.collections.<get-indices>") }
 
-        addParamCountRestrictions { it == 0 }
+        parametersSizeRestriction { it == 0 }
 
-        addExtensionReceiverRestriction { it.type.classifierOrNull in supportedArrays }
+        extensionReceiverRestriction { it.type.classifierOrNull in supportedArrays }
     }
 
-    private val isUntilMatch = IrMatcher(context).apply {
-        addParamCountRestrictions { it == 1 }
+    private val untilMatcher = createFunctionMatcher {
 
-        addParameterRestriction(0) { it.type.classifierOrNull in progressionElementClasses }
+        parametersSizeRestriction { it == 1 }
 
-        addNameRestriction { it == FqName("kotlin.ranges.until") }
+        parameterRestriction(0) { it.type.classifierOrNull in progressionElementClasses }
 
-        addExtensionReceiverRestriction { it.type.classifierOrNull in progressionElementClasses }
+        fqNameRestriction { it == FqName("kotlin.ranges.until") }
+
+        extensionReceiverRestriction { it.type.classifierOrNull in progressionElementClasses }
+    }
+
+    private val rangeToMatcher = createFunctionMatcher {
+
+        dispatchReceiverRestriction { it.type.classifierOrNull in progressionElementClasses }
+
+        fqNameRestriction { it.pathSegments().last() == Name.identifier("rangeTo") }
+
+        parametersSizeRestriction { it == 1 }
+
+        parameterRestriction(0) { it.type.classifierOrNull in progressionElementClasses }
+    }
+
+    private val downToMatcher = createFunctionMatcher {
+
+        extensionReceiverRestriction { it.type.classifierOrNull in progressionElementClasses }
+
+        fqNameRestriction { it == FqName("kotlin.ranges.downTo") }
+
+        parametersSizeRestriction { it == 1 }
+
+        parameterRestriction(0) { it.type.classifierOrNull in progressionElementClasses }
+    }
+
+    private val stepMatcher = createFunctionMatcher {
+
+        extensionReceiverRestriction { it.type.classifierOrNull in symbols.progressionClasses }
+
+        fqNameRestriction { it == FqName("kotlin.ranges.step") }
+
+        parametersSizeRestriction { it == 1 }
+
+        parameterRestriction(0) { it.type.isInt() || it.type.isLong() }
     }
 
     // TODO: Process constructors and other factory functions.
-    private val handlers = listOf(
-            isIndicesMatch::match to ::buildIndices,
-            ::isRangeTo to ::buildRangeTo,
-            isUntilMatch::match   to ::buildUntil,
-            ::isDownTo  to ::buildDownTo,
-            ::isStep    to ::buildStep
+    private val callHandlers = listOf(
+            indicesMatcher::match to ::buildIndices,
+            rangeToMatcher::match to ::buildRangeTo,
+            untilMatcher::match   to ::buildUntil,
+            downToMatcher::match  to ::buildDownTo,
+            stepMatcher::match    to ::buildStep
     )
 
     private fun handleCall(call: IrCall, progressionType: ProgressionType): ProgressionInfo? =
-            handlers.firstOrNull { (checker, _) ->
+            callHandlers.firstOrNull { (checker, _) ->
                 checker(call.symbol.owner)
             }?.let { (_, builder) -> builder(call, progressionType) }
-
-    private fun isRangeTo(irFunction: IrFunction): Boolean {
-        if (irFunction.valueParameters.size == 1 && irFunction.valueParameters[0].type.classifierOrNull in progressionElementClasses) {
-            for (progressionElementClass in progressionElementClasses) {
-                val name = Name.identifier("rangeTo")
-                if (progressionElementClass.owner.fqNameSafe.child(name) == irFunction.fqNameSafe) {
-                    return true
-                }
-            }
-            return false
-        }
-        return false
-    }
-
-    private fun isDownTo(irFunction: IrFunction): Boolean {
-        if (irFunction.extensionReceiverParameter?.type?.classifierOrNull !in progressionElementClasses) {
-            return false
-        }
-        if (irFunction.fqNameSafe != FqName("kotlin.ranges.downTo")) {
-            return false
-        }
-        if (irFunction.valueParameters.size == 1) {
-            val param = irFunction.valueParameters[0]
-            return param.type.classifierOrNull in progressionElementClasses
-        }
-        return false
-    }
-
-    private fun isStep(irFunction: IrFunction): Boolean {
-        if (irFunction.fqNameSafe != FqName("kotlin.ranges.step")) {
-            return false
-        }
-        if (irFunction.extensionReceiverParameter?.type?.classifierOrNull !in symbols.progressionClasses) {
-            return false
-        }
-        if (irFunction.valueParameters.size == 1) {
-            val param = irFunction.valueParameters[0]
-            return param.type.isInt() || param.type.isLong()
-        }
-        return false
-    }
 
     private fun buildIndices(expression: IrCall, progressionType: ProgressionType): ProgressionInfo? {
         val int0 = IrConstImpl.int(expression.startOffset, expression.endOffset, context.irBuiltIns.intType, 0)
@@ -204,8 +196,7 @@ internal class ProgressionInfoBuilder(val context: Context) : IrElementVisitor<P
     override fun visitElement(element: IrElement, data: Nothing?): ProgressionInfo? = null
 
     override fun visitCall(expression: IrCall, data: Nothing?): ProgressionInfo? {
-        val progressionType = expression.type.getProgressionType()
-                ?: return null
+        val progressionType = expression.type.getProgressionType() ?: return null
 
         return handleCall(expression, progressionType)
     }

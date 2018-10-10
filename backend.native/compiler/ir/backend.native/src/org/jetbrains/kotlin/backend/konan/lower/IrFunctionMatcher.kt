@@ -1,33 +1,43 @@
-package org.jetbrains.kotlin.backend.konan.lower.loops
+package org.jetbrains.kotlin.backend.konan.lower
 
-import org.jetbrains.kotlin.backend.konan.Context
 import org.jetbrains.kotlin.backend.konan.irasdescriptors.fqNameSafe
 import org.jetbrains.kotlin.ir.declarations.IrFunction
 import org.jetbrains.kotlin.ir.declarations.IrValueParameter
 import org.jetbrains.kotlin.name.FqName
 
-internal class IrMatcher(val context: Context) {
 
-    private val parameterRestrictins = mutableListOf<Pair<Int, (IrValueParameter) -> Boolean>>()
+internal inline fun createFunctionMatcher(restrictions: IrFunctionMatcher.() -> Unit): IrFunctionMatcher =
+        IrFunctionMatcher().apply(restrictions)
+
+internal class IrFunctionMatcher {
+
+    private val parameterRestrictions = mutableListOf<Pair<Int, (IrValueParameter) -> Boolean>>()
+
     private val extensionReceiverRestrictions = mutableListOf<(IrValueParameter) -> Boolean>()
+
+    private val dispatchReceiverRestrictions = mutableListOf<(IrValueParameter) -> Boolean>()
 
     private val nameRestrictions = mutableListOf<(FqName) -> Boolean>()
 
     private val paramCountRestrictions = mutableListOf<(Int) -> Boolean>()
 
-    fun addNameRestriction(restriction: (FqName) -> Boolean) {
+    fun fqNameRestriction(restriction: (FqName) -> Boolean) {
         nameRestrictions += restriction
     }
 
-    fun addParameterRestriction(idx: Int, restriction: (IrValueParameter) -> Boolean) {
-        parameterRestrictins += idx to restriction
+    fun parameterRestriction(idx: Int, restriction: (IrValueParameter) -> Boolean) {
+        parameterRestrictions += idx to restriction
     }
 
-    fun addExtensionReceiverRestriction(restriction: (IrValueParameter) -> Boolean) {
+    fun extensionReceiverRestriction(restriction: (IrValueParameter) -> Boolean) {
         extensionReceiverRestrictions += restriction
     }
 
-    fun addParamCountRestrictions(restriction: (Int) -> Boolean) {
+    fun dispatchReceiverRestriction(restriction: (IrValueParameter) -> Boolean) {
+        dispatchReceiverRestrictions += restriction
+    }
+
+    fun parametersSizeRestriction(restriction: (Int) -> Boolean) {
         paramCountRestrictions += restriction
     }
 
@@ -46,14 +56,23 @@ internal class IrMatcher(val context: Context) {
             }
         }
 
-        parameterRestrictins.forEach { (idx, resrt) ->
-            if (params.size <= idx || !resrt(params[idx])){
+        parameterRestrictions.forEach { (idx, match) ->
+            if (params.size <= idx || !match(params[idx])){
                 return false
             }
         }
+
         if (function.extensionReceiverParameter != null) {
             extensionReceiverRestrictions.forEach {
                 if (!it(function.extensionReceiverParameter!!)) {
+                    return false
+                }
+            }
+        }
+
+        if (function.dispatchReceiverParameter != null) {
+            extensionReceiverRestrictions.forEach {
+                if (!it(function.dispatchReceiverParameter!!)) {
                     return false
                 }
             }
