@@ -69,6 +69,8 @@ private fun ProgressionType.elementType(context: Context): IrType = when (this) 
 
 private class ForLoopsTransformer(val context: Context) : IrElementTransformerVoidWithContext() {
 
+    private val progressionInfoBuilder = ProgressionInfoBuilder(context)
+
     private val symbols = context.ir.symbols
     private val iteratorToLoopInfo = mutableMapOf<IrVariableSymbol, ForLoopInfo>()
     internal val oldLoopToNewLoop = mutableMapOf<IrLoop, IrLoop>()
@@ -148,7 +150,7 @@ private class ForLoopsTransformer(val context: Context) : IrElementTransformerVo
 
         val builder = context.createIrBuilder(scopeOwnerSymbol, variable.startOffset, variable.endOffset)
         // Collect loop info and form the loop header composite.
-        val progressionInfo = initializer.dispatchReceiver?.accept(ProgressionInfoBuilder(context), null)
+        val progressionInfo = initializer.dispatchReceiver?.accept(progressionInfoBuilder, null)
                 ?: return null
 
         with(builder) {

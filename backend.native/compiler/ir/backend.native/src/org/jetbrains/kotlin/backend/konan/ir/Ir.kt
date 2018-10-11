@@ -36,8 +36,8 @@ import org.jetbrains.kotlin.ir.util.*
 import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
+import org.jetbrains.kotlin.resolve.scopes.MemberScope
 import org.jetbrains.kotlin.types.KotlinType
-import org.jetbrains.kotlin.types.SimpleType
 import org.jetbrains.kotlin.types.TypeUtils
 import kotlin.properties.Delegates
 
@@ -283,42 +283,49 @@ internal class KonanSymbols(context: Context, val symbolTable: SymbolTable, val 
 
     val arrayContentToString = arrays.associateBy(
             { it },
-            { findArrayExtensionFunction(it.descriptor, "contentToString") }
+            { findArrayExtension(it.descriptor, "contentToString", ExtensionKind.FUNCTION) }
     )
     val arrayContentHashCode = arrays.associateBy(
             { it },
-            { findArrayExtensionFunction(it.descriptor, "contentHashCode") }
+            { findArrayExtension(it.descriptor, "contentHashCode", ExtensionKind.FUNCTION) }
     )
 
     // Arrays of unsigned primitives have not `lastIndex` extension.
     val arrayLastIndex = (primitiveArrays.values + array).associateBy(
             { it },
-            { findArrayExtensionGetter(it.descriptor, "lastIndex") }
+            { findArrayExtension(it.descriptor, "lastIndex", ExtensionKind.PROPERTY_GETTER) }
     )
 
-    fun findArrayExtensionFunction(descriptor: ClassDescriptor, name: String): IrSimpleFunctionSymbol {
-        val functionDescriptor = builtInsPackage("kotlin", "collections")
-                .getContributedFunctions(Name.identifier(name), NoLookupLocation.FROM_BACKEND)
+    enum class ExtensionKind {
+        FUNCTION,
+        PROPERTY_GETTER,
+        PROPERTY_SETTER;
+
+        fun filterScope(memberScope: MemberScope, name: String): Collection<FunctionDescriptor> {
+            val identifier = Name.identifier(name)
+            val location = NoLookupLocation.FROM_BACKEND
+            return when (this) {
+                FUNCTION -> memberScope.getContributedFunctions(identifier, location)
+                PROPERTY_GETTER -> memberScope.getContributedVariables(identifier, location)
+                        .mapNotNull { it.getter }
+                PROPERTY_SETTER -> memberScope.getContributedVariables(identifier, location)
+                        .mapNotNull { it.setter }
+            }
+        }
+    }
+
+    private fun findArrayExtension(descriptor: ClassDescriptor, name: String,
+                                   kind: ExtensionKind): IrSimpleFunctionSymbol {
+
+        val functionDescriptor = kind.filterScope(builtInsPackage("kotlin", "collections"), name)
                 .singleOrNull {
                     it.valueParameters.isEmpty()
                             && it.extensionReceiverParameter?.type?.constructor?.declarationDescriptor == descriptor
                             && !it.isExpect
-                }
-                ?: throw Error(descriptor.toString())
+                } ?: error(descriptor.toString())
         return symbolTable.referenceSimpleFunction(functionDescriptor)
     }
 
-    fun findArrayExtensionGetter(descriptor: ClassDescriptor, name: String): IrSimpleFunctionSymbol {
-        val functionDescriptor = builtInsPackage("kotlin", "collections")
-                .getContributedVariables(Name.identifier(name), NoLookupLocation.FROM_BACKEND)
-                .singleOrNull {
-                    it.valueParameters.isEmpty()
-                            && it.extensionReceiverParameter?.type?.constructor?.declarationDescriptor == descriptor
-                            && !it.isExpect
-                }?.getter
-                ?: throw Error(descriptor.toString())
-        return symbolTable.referenceSimpleFunction(functionDescriptor)
-    }
 
     override val copyRangeTo = arrays.map { symbol ->
         val packageViewDescriptor = builtIns.builtInsModule.getPackage(KotlinBuiltIns.COLLECTIONS_PACKAGE_FQ_NAME)

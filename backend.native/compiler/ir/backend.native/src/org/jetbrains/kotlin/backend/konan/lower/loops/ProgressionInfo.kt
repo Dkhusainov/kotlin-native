@@ -3,6 +3,7 @@ package org.jetbrains.kotlin.backend.konan.lower.loops
 import org.jetbrains.kotlin.backend.common.lower.createIrBuilder
 import org.jetbrains.kotlin.backend.konan.Context
 import org.jetbrains.kotlin.backend.konan.irasdescriptors.isSubtypeOf
+import org.jetbrains.kotlin.backend.konan.lower.IrFunctionMatcher
 import org.jetbrains.kotlin.backend.konan.lower.createFunctionMatcher
 import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.builders.irCall
@@ -39,13 +40,26 @@ private fun IrConst<*>.isOne() = when (kind) {
 
 // Used only by the assert.
 private fun stepHasRightType(step: IrExpression, progressionType: ProgressionType) = when (progressionType) {
+
     ProgressionType.CHAR_PROGRESSION,
     ProgressionType.INT_PROGRESSION -> step.type.makeNotNull().isInt()
 
     ProgressionType.LONG_PROGRESSION -> step.type.makeNotNull().isLong()
 }
 
+
+
 internal class ProgressionInfoBuilder(val context: Context) : IrElementVisitor<ProgressionInfo?, Nothing?> {
+
+    private val getIndicesFqName = FqName("kotlin.collections.<get-indices>")
+
+    private val untilFqName = FqName("kotlin.ranges.until")
+
+    private val stepFqName = FqName("kotlin.ranges.step")
+
+    private val downToFqName = FqName("kotlin.ranges.downTo")
+
+    private val rangeToName = Name.identifier("rangeTo")
 
     private val symbols = context.ir.symbols
 
@@ -55,29 +69,35 @@ internal class ProgressionInfoBuilder(val context: Context) : IrElementVisitor<P
 
         val supportedArrays = symbols.primitiveArrays.values + symbols.array
 
-        fqNameRestriction { it == FqName("kotlin.collections.<get-indices>") }
+        functionKind = IrFunctionMatcher.Kind.EXTENSION
+
+        receiverRestriction { it.type.classifierOrNull in supportedArrays }
+
+        fqNameRestriction { it == getIndicesFqName }
 
         parametersSizeRestriction { it == 0 }
-
-        extensionReceiverRestriction { it.type.classifierOrNull in supportedArrays }
     }
 
     private val untilMatcher = createFunctionMatcher {
+
+        functionKind = IrFunctionMatcher.Kind.EXTENSION
+
+        receiverRestriction { it.type.classifierOrNull in progressionElementClasses }
 
         parametersSizeRestriction { it == 1 }
 
         parameterRestriction(0) { it.type.classifierOrNull in progressionElementClasses }
 
-        fqNameRestriction { it == FqName("kotlin.ranges.until") }
-
-        extensionReceiverRestriction { it.type.classifierOrNull in progressionElementClasses }
+        fqNameRestriction { it == untilFqName }
     }
 
     private val rangeToMatcher = createFunctionMatcher {
 
-        dispatchReceiverRestriction { it.type.classifierOrNull in progressionElementClasses }
+        functionKind = IrFunctionMatcher.Kind.METHOD
 
-        fqNameRestriction { it.pathSegments().last() == Name.identifier("rangeTo") }
+        receiverRestriction { it.type.classifierOrNull in progressionElementClasses }
+
+        fqNameRestriction { it.pathSegments().last() == rangeToName }
 
         parametersSizeRestriction { it == 1 }
 
@@ -86,9 +106,11 @@ internal class ProgressionInfoBuilder(val context: Context) : IrElementVisitor<P
 
     private val downToMatcher = createFunctionMatcher {
 
-        extensionReceiverRestriction { it.type.classifierOrNull in progressionElementClasses }
+        functionKind = IrFunctionMatcher.Kind.EXTENSION
 
-        fqNameRestriction { it == FqName("kotlin.ranges.downTo") }
+        receiverRestriction { it.type.classifierOrNull in progressionElementClasses }
+
+        fqNameRestriction { it == downToFqName }
 
         parametersSizeRestriction { it == 1 }
 
@@ -97,9 +119,11 @@ internal class ProgressionInfoBuilder(val context: Context) : IrElementVisitor<P
 
     private val stepMatcher = createFunctionMatcher {
 
-        extensionReceiverRestriction { it.type.classifierOrNull in symbols.progressionClasses }
+        functionKind = IrFunctionMatcher.Kind.EXTENSION
 
-        fqNameRestriction { it == FqName("kotlin.ranges.step") }
+        receiverRestriction { it.type.classifierOrNull in symbols.progressionClasses }
+
+        fqNameRestriction { it == stepFqName }
 
         parametersSizeRestriction { it == 1 }
 
