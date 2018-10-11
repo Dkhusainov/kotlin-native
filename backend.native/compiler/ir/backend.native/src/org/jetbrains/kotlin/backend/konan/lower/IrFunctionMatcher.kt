@@ -71,7 +71,7 @@ internal class IrFunctionMatcher {
         }
 
         if (function.dispatchReceiverParameter != null) {
-            extensionReceiverRestrictions.forEach {
+            dispatchReceiverRestrictions.forEach {
                 if (!it(function.dispatchReceiverParameter!!)) {
                     return false
                 }

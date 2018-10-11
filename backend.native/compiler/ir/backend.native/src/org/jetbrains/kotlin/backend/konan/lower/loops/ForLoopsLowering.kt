@@ -170,13 +170,17 @@ private class ForLoopsTransformer(val context: Context) : IrElementTransformerVo
                     statements.add(it)
                 }
 
-                val boundValue = scope.createTemporaryVariable(bound.castIfNecessary(progressionType),
+                val boundValue = scope.createTemporaryVariable(ensureNotNullable(bound.castIfNecessary(progressionType)),
                         nameHint = "bound",
                         origin = IrDeclarationOrigin.FOR_LOOP_IMPLICIT_VARIABLE)
                         .also { statements.add(it) }
 
+                val stepExpression = if (step != null) {
+                    if (increasing) step else step.unaryMinus()
+                } else {
+                    defaultStep(startOffset, endOffset)
+                }
 
-                val stepExpression = (if (increasing) step else step?.unaryMinus()) ?: defaultStep(startOffset, endOffset)
                 val stepValue = scope.createTemporaryVariable(ensureNotNullable(stepExpression),
                         nameHint = "step",
                         origin = IrDeclarationOrigin.FOR_LOOP_IMPLICIT_VARIABLE).also {
@@ -189,27 +193,25 @@ private class ForLoopsTransformer(val context: Context) : IrElementTransformerVo
                 //    boundValue - 1, if step is 1 and the range is open.
                 //    getProgressionLast(inductionVariable, boundValue, step), if step != 1 and the range is closed.
                 //    getProgressionLast(inductionVariable, boundValue - 1, step), if step != 1 and the range is open.
-                var lastExpression: IrExpression? = null
-                if (!closed) {
+                var lastExpression: IrExpression = if (!closed) {
                     val decrementSymbol = symbols.getUnaryOperator(OperatorNameConventions.DEC, boundValue.type.toKotlinType())
-                    lastExpression = irCall(decrementSymbol.owner).apply {
+                    irCall(decrementSymbol.owner).apply {
                         dispatchReceiver = irGet(boundValue)
                     }
+                } else {
+                    irGet(boundValue)
                 }
                 if (needLastCalculation) {
                     lastExpression = irGetProgressionLast(progressionType,
                             inductionVariable,
-                            lastExpression ?: irGet(boundValue),
+                            lastExpression,
                             stepValue)
                 }
-                val lastValue = if (lastExpression != null) {
-                    scope.createTemporaryVariable(lastExpression,
-                            nameHint = "last",
-                            origin = IrDeclarationOrigin.FOR_LOOP_IMPLICIT_VARIABLE).also {
-                        statements.add(it)
-                    }
-                } else {
-                    boundValue
+
+                val lastValue = scope.createTemporaryVariable(lastExpression,
+                        nameHint = "last",
+                        origin = IrDeclarationOrigin.FOR_LOOP_IMPLICIT_VARIABLE).also {
+                    statements.add(it)
                 }
 
                 iteratorToLoopInfo[symbol] = ForLoopInfo(progressionInfo,

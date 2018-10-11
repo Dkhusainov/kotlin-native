@@ -38,10 +38,11 @@ private fun IrConst<*>.isOne() = when (kind) {
         }
 
 // Used only by the assert.
-private fun stepHasRightType(step: IrExpression, progressionType: ProgressionType) = when(progressionType) {
-    ProgressionType.CHAR_PROGRESSION, ProgressionType.INT_PROGRESSION -> step.type.isInt()
+private fun stepHasRightType(step: IrExpression, progressionType: ProgressionType) = when (progressionType) {
+    ProgressionType.CHAR_PROGRESSION,
+    ProgressionType.INT_PROGRESSION -> step.type.makeNotNull().isInt()
 
-    ProgressionType.LONG_PROGRESSION -> step.type.isLong()
+    ProgressionType.LONG_PROGRESSION -> step.type.makeNotNull().isLong()
 }
 
 internal class ProgressionInfoBuilder(val context: Context) : IrElementVisitor<ProgressionInfo?, Nothing?> {
@@ -153,10 +154,11 @@ internal class ProgressionInfoBuilder(val context: Context) : IrElementVisitor<P
             expression.extensionReceiver!!.accept(this, null)?.let {
                 val newStep = expression.getValueArgument(0)!!
                 val (newStepCheck, needBoundCalculation) = irCheckProgressionStep(progressionType, newStep)
-                val step = when {
-                    it.step == null -> newStepCheck
+                // TODO: what if newStep == newStepCheck
+                val step = when (it.step) {
+                    null -> newStepCheck
                     // There were step calls before. Just add our check in the container or create a new one.
-                    it.step is IrStatementContainer -> {
+                    is IrStatementContainer -> {
                         it.step.statements.add(newStepCheck)
                         it.step
                     }
@@ -168,8 +170,7 @@ internal class ProgressionInfoBuilder(val context: Context) : IrElementVisitor<P
                 ProgressionInfo(progressionType, it.first, it.bound, step, it.increasing, needBoundCalculation, it.closed)
             }
 
-    private fun irCheckProgressionStep(progressionType: ProgressionType,
-                                       step: IrExpression): Pair<IrExpression, Boolean> {
+    private fun irCheckProgressionStep(progressionType: ProgressionType, step: IrExpression): Pair<IrExpression, Boolean> {
         if (step is IrConst<*> &&
                 ((step.kind == IrConstKind.Long && step.value as Long > 0) ||
                         (step.kind == IrConstKind.Int && step.value as Int > 0))) {
@@ -179,7 +180,7 @@ internal class ProgressionInfoBuilder(val context: Context) : IrElementVisitor<P
         // so there is no need to cast it.
         assert(stepHasRightType(step, progressionType))
 
-        val symbol = symbols.checkProgressionStep[step.type.toKotlinType()]
+        val symbol = symbols.checkProgressionStep[step.type.makeNotNull().toKotlinType()]
                 ?: throw IllegalArgumentException("No `checkProgressionStep` for type ${step.type}")
         return IrCallImpl(step.startOffset, step.endOffset, symbol.owner.returnType, symbol).apply {
             putValueArgument(0, step)
