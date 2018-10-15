@@ -3,8 +3,8 @@ package org.jetbrains.kotlin.backend.konan.lower.loops
 import org.jetbrains.kotlin.backend.common.lower.createIrBuilder
 import org.jetbrains.kotlin.backend.konan.Context
 import org.jetbrains.kotlin.backend.konan.irasdescriptors.isSubtypeOf
-import org.jetbrains.kotlin.backend.konan.lower.IrFunctionMatcher
-import org.jetbrains.kotlin.backend.konan.lower.createFunctionMatcher
+import org.jetbrains.kotlin.backend.konan.lower.matchers.IrFunctionMatcher
+import org.jetbrains.kotlin.backend.konan.lower.matchers.createFunctionMatcher
 import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.builders.irCall
 import org.jetbrains.kotlin.ir.expressions.*
@@ -32,7 +32,7 @@ internal data class ProgressionInfo(
         var needLastCalculation: Boolean = false,
         val closed: Boolean = true)
 
-private fun IrConst<*>.isOne() = when (kind) {
+private fun IrConst<*>.stepIsOne() = when (kind) {
             IrConstKind.Long -> value as Long == 1L
             IrConstKind.Int -> value as Int == 1
             else -> false
@@ -66,67 +66,42 @@ internal class ProgressionInfoBuilder(val context: Context) : IrElementVisitor<P
     private val progressionElementClasses = symbols.integerClasses + symbols.char
 
     private val indicesMatcher = createFunctionMatcher {
-
         val supportedArrays = symbols.primitiveArrays.values + symbols.array
-
         functionKind = IrFunctionMatcher.Kind.EXTENSION
-
         receiverRestriction { it.type.classifierOrNull in supportedArrays }
-
         fqNameRestriction { it == getIndicesFqName }
-
         parametersSizeRestriction { it == 0 }
     }
 
     private val untilMatcher = createFunctionMatcher {
-
         functionKind = IrFunctionMatcher.Kind.EXTENSION
-
         receiverRestriction { it.type.classifierOrNull in progressionElementClasses }
-
         parametersSizeRestriction { it == 1 }
-
         parameterRestriction(0) { it.type.classifierOrNull in progressionElementClasses }
-
         fqNameRestriction { it == untilFqName }
     }
 
     private val rangeToMatcher = createFunctionMatcher {
-
         functionKind = IrFunctionMatcher.Kind.METHOD
-
         receiverRestriction { it.type.classifierOrNull in progressionElementClasses }
-
         fqNameRestriction { it.pathSegments().last() == rangeToName }
-
         parametersSizeRestriction { it == 1 }
-
         parameterRestriction(0) { it.type.classifierOrNull in progressionElementClasses }
     }
 
     private val downToMatcher = createFunctionMatcher {
-
         functionKind = IrFunctionMatcher.Kind.EXTENSION
-
         receiverRestriction { it.type.classifierOrNull in progressionElementClasses }
-
         fqNameRestriction { it == downToFqName }
-
         parametersSizeRestriction { it == 1 }
-
         parameterRestriction(0) { it.type.classifierOrNull in progressionElementClasses }
     }
 
     private val stepMatcher = createFunctionMatcher {
-
         functionKind = IrFunctionMatcher.Kind.EXTENSION
-
         receiverRestriction { it.type.classifierOrNull in symbols.progressionClasses }
-
         fqNameRestriction { it == stepFqName }
-
         parametersSizeRestriction { it == 1 }
-
         parameterRestriction(0) { it.type.isInt() || it.type.isLong() }
     }
 
@@ -197,8 +172,8 @@ internal class ProgressionInfoBuilder(val context: Context) : IrElementVisitor<P
     private fun irCheckProgressionStep(progressionType: ProgressionType, step: IrExpression): Pair<IrExpression, Boolean> {
         if (step is IrConst<*> &&
                 ((step.kind == IrConstKind.Long && step.value as Long > 0) ||
-                        (step.kind == IrConstKind.Int && step.value as Int > 0))) {
-            return step to !step.isOne()
+                    (step.kind == IrConstKind.Int && step.value as Int > 0))) {
+            return step to !step.stepIsOne()
         }
         // The frontend checks if the step has a right type (Long for LongProgression and Int for {Int/Char}Progression)
         // so there is no need to cast it.

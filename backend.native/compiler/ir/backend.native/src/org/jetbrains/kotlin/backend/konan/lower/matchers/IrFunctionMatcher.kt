@@ -1,4 +1,4 @@
-package org.jetbrains.kotlin.backend.konan.lower
+package org.jetbrains.kotlin.backend.konan.lower.matchers
 
 import org.jetbrains.kotlin.backend.konan.irasdescriptors.fqNameSafe
 import org.jetbrains.kotlin.ir.declarations.IrFunction
@@ -57,19 +57,16 @@ internal class IrFunctionMatcher(var functionKind: Kind = Kind.ANY) {
                 return false
             }
         }
-
         paramCountRestrictions.forEach {
             if (!it(params.size)) {
                 return false
             }
         }
-
         parameterRestrictions.forEach { (idx, match) ->
             if (params.size <= idx || !match(params[idx])){
                 return false
             }
         }
-
         return true
     }
 
@@ -93,11 +90,9 @@ internal class IrFunctionMatcher(var functionKind: Kind = Kind.ANY) {
                     receiverRestrictions.all { it(receiver) }
                 }
             }
-
             Kind.NO_RECEIVER -> {
                 receiver == null
             }
-
             Kind.EXTENSION -> {
                 if (receiver == null) {
                     false
@@ -105,7 +100,6 @@ internal class IrFunctionMatcher(var functionKind: Kind = Kind.ANY) {
                     function.extensionReceiverParameter != null && receiverRestrictions.all { it(receiver) }
                 }
             }
-
             Kind.METHOD -> {
                 if (receiver == null) {
                     false
