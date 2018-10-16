@@ -37,8 +37,11 @@ import org.jetbrains.kotlin.util.OperatorNameConventions
  *   simple while loop over primitive induction variable.
  */
 internal class ForLoopsLowering(val context: Context) : FileLoweringPass {
+
+    private val progressionInfoBuilder = ProgressionInfoBuilder(context)
+
     override fun lower(irFile: IrFile) {
-        val transformer = ForLoopsTransformer(context)
+        val transformer = ForLoopsTransformer(context, progressionInfoBuilder)
         // Lower loops
         irFile.transformChildrenVoid(transformer)
 
@@ -67,9 +70,7 @@ private fun ProgressionType.elementType(context: Context): IrType = when (this) 
     ProgressionType.CHAR_PROGRESSION -> context.irBuiltIns.charType
 }
 
-private class ForLoopsTransformer(val context: Context) : IrElementTransformerVoidWithContext() {
-
-    private val progressionInfoBuilder = ProgressionInfoBuilder(context)
+private class ForLoopsTransformer(val context: Context, val progressionInfoBuilder: ProgressionInfoBuilder) : IrElementTransformerVoidWithContext() {
 
     private val symbols = context.ir.symbols
     private val iteratorToLoopInfo = mutableMapOf<IrVariableSymbol, ForLoopInfo>()

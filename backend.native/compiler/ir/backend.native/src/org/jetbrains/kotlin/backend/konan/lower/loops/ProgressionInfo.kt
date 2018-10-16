@@ -2,20 +2,22 @@ package org.jetbrains.kotlin.backend.konan.lower.loops
 
 import org.jetbrains.kotlin.backend.common.lower.createIrBuilder
 import org.jetbrains.kotlin.backend.konan.Context
+import org.jetbrains.kotlin.backend.konan.ir.KonanSymbols
 import org.jetbrains.kotlin.backend.konan.irasdescriptors.isSubtypeOf
-import org.jetbrains.kotlin.backend.konan.lower.matchers.IrFunctionMatcher
-import org.jetbrains.kotlin.backend.konan.lower.matchers.createFunctionMatcher
+import org.jetbrains.kotlin.backend.konan.lower.matchers.*
 import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.builders.irCall
 import org.jetbrains.kotlin.ir.expressions.*
 import org.jetbrains.kotlin.ir.expressions.impl.IrCallImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrCompositeImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrConstImpl
+import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
 import org.jetbrains.kotlin.ir.types.*
 import org.jetbrains.kotlin.ir.util.defaultType
 import org.jetbrains.kotlin.ir.visitors.IrElementVisitor
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
+import org.jetbrains.kotlin.utils.addToStdlib.firstNotNullResult
 
 enum class ProgressionType(val numberCastFunctionName: Name) {
     INT_PROGRESSION(Name.identifier("toInt")),
@@ -32,159 +34,158 @@ internal data class ProgressionInfo(
         var needLastCalculation: Boolean = false,
         val closed: Boolean = true)
 
-private fun IrConst<*>.stepIsOne() = when (kind) {
-            IrConstKind.Long -> value as Long == 1L
-            IrConstKind.Int -> value as Int == 1
-            else -> false
-        }
+private interface ProgressionHandler {
+    val matcher: IrCallMatcher
 
-// Used only by the assert.
-private fun stepHasRightType(step: IrExpression, progressionType: ProgressionType) = when (progressionType) {
+    fun build(call: IrCall, progressionType: ProgressionType): ProgressionInfo?
 
-    ProgressionType.CHAR_PROGRESSION,
-    ProgressionType.INT_PROGRESSION -> step.type.makeNotNull().isInt()
-
-    ProgressionType.LONG_PROGRESSION -> step.type.makeNotNull().isLong()
+    fun handle(irCall: IrCall, progressionType: ProgressionType) = if (matcher(irCall)) {
+        build(irCall, progressionType)
+    } else {
+        null
+    }
 }
 
+private class RangeToHandler(val progressionElementClasses: Collection<IrClassSymbol>) : ProgressionHandler {
+    override val matcher = SimpleCalleeMatcher {
+        dispatchReceiverRestriction { it != null && it.type.classifierOrNull in progressionElementClasses }
+        fqNameRestriction { it.pathSegments().last() == Name.identifier("rangeTo") }
+        parameterCountRestriction { it == 1 }
+        parameterRestriction(0) { it.type.classifierOrNull in progressionElementClasses }
+    }
 
+    override fun build(call: IrCall, progressionType: ProgressionType) =
+            ProgressionInfo(progressionType, call.dispatchReceiver!!, call.getValueArgument(0)!!)
+}
+
+private class DownToHandler(val progressionElementClasses: Collection<IrClassSymbol>) : ProgressionHandler {
+    override val matcher = SimpleCalleeMatcher {
+        singleArgumentExtension(FqName("kotlin.ranges.downTo"), progressionElementClasses)
+        parameterRestriction(0) { it.type.classifierOrNull in progressionElementClasses }
+    }
+
+    override fun build(call: IrCall, progressionType: ProgressionType): ProgressionInfo? =
+            ProgressionInfo(progressionType,
+                    call.extensionReceiver!!,
+                    call.getValueArgument(0)!!,
+                    increasing = false)
+}
+
+private class UntilHandler(val progressionElementClasses: Collection<IrClassSymbol>) : ProgressionHandler {
+    override val matcher = SimpleCalleeMatcher {
+        singleArgumentExtension(FqName("kotlin.ranges.until"), progressionElementClasses)
+        parameterRestriction(0) { it.type.classifierOrNull in progressionElementClasses }
+    }
+
+    override fun build(call: IrCall, progressionType: ProgressionType): ProgressionInfo? =
+            ProgressionInfo(progressionType,
+                    call.extensionReceiver!!,
+                    call.getValueArgument(0)!!,
+                    closed = false)
+}
+
+private class IndicesHandler(val context: Context) : ProgressionHandler {
+
+    private val symbols = context.ir.symbols
+
+    private val supportedArrays = symbols.primitiveArrays.values + symbols.array
+
+    override val matcher = SimpleCalleeMatcher {
+        extensionReceiverRestriction { it != null && it.type.classifierOrNull in supportedArrays }
+        fqNameRestriction { it == FqName("kotlin.collections.<get-indices>") }
+        parameterCountRestriction { it == 0 }
+    }
+
+    override fun build(call: IrCall, progressionType: ProgressionType): ProgressionInfo? {
+        val int0 = IrConstImpl.int(call.startOffset, call.endOffset, context.irBuiltIns.intType, 0)
+
+        val bound = with(context.createIrBuilder(call.symbol, call.startOffset, call.endOffset)) {
+            val clazz = call.extensionReceiver!!.type.classifierOrFail
+            val symbol = symbols.arraySize[clazz]!!
+            irCall(symbol).apply {
+                dispatchReceiver = call.extensionReceiver
+            }
+        }
+        return ProgressionInfo(progressionType, int0, bound, closed = false)
+    }
+}
+
+private class StepHandler(context: Context, val visitor: IrElementVisitor<ProgressionInfo?, Nothing?>) : ProgressionHandler {
+    private val symbols = context.ir.symbols
+
+    override val matcher = SimpleCalleeMatcher {
+        singleArgumentExtension(FqName("kotlin.ranges.step"), symbols.progressionClasses)
+        parameterRestriction(0) { it.type.isInt() || it.type.isLong() }
+    }
+
+    override fun build(call: IrCall, progressionType: ProgressionType): ProgressionInfo? {
+        return call.extensionReceiver!!.accept(visitor, null)?.let {
+            val newStep = call.getValueArgument(0)!!
+            val (newStepCheck, needBoundCalculation) = irCheckProgressionStep(symbols, progressionType, newStep)
+            // TODO: what if newStep == newStepCheck
+            val step = when (it.step) {
+                null -> newStepCheck
+                // There were step calls before. Just add our check in the container or create a new one.
+                is IrStatementContainer -> {
+                    it.step.statements.add(newStepCheck)
+                    it.step
+                }
+                else -> IrCompositeImpl(call.startOffset, call.endOffset, newStep.type).apply {
+                    statements.add(it.step)
+                    statements.add(newStepCheck)
+                }
+            }
+            ProgressionInfo(progressionType, it.first, it.bound, step, it.increasing, needBoundCalculation, it.closed)
+        }
+    }
+
+    private fun IrConst<*>.stepIsOne() = when (kind) {
+        IrConstKind.Long -> value as Long == 1L
+        IrConstKind.Int -> value as Int == 1
+        else -> false
+    }
+
+    private fun IrExpression.isPositiveConst() = this is IrConst<*> &&
+            ((kind == IrConstKind.Long && value as Long > 0) || (kind == IrConstKind.Int && value as Int > 0))
+
+    // Used only by the assert.
+    private fun stepHasRightType(step: IrExpression, progressionType: ProgressionType) = when (progressionType) {
+
+        ProgressionType.CHAR_PROGRESSION,
+        ProgressionType.INT_PROGRESSION -> step.type.makeNotNull().isInt()
+
+        ProgressionType.LONG_PROGRESSION -> step.type.makeNotNull().isLong()
+    }
+
+    private fun irCheckProgressionStep(symbols: KonanSymbols, progressionType: ProgressionType, step: IrExpression) =
+            if (step.isPositiveConst()) {
+                step to !(step as IrConst<*>).stepIsOne()
+            } else {
+                // The frontend checks if the step has a right type (Long for LongProgression and Int for {Int/Char}Progression)
+                // so there is no need to cast it.
+                assert(stepHasRightType(step, progressionType))
+
+                val symbol = symbols.checkProgressionStep[step.type.makeNotNull().toKotlinType()]
+                        ?: throw IllegalArgumentException("No `checkProgressionStep` for type ${step.type}")
+                IrCallImpl(step.startOffset, step.endOffset, symbol.owner.returnType, symbol).apply {
+                    putValueArgument(0, step)
+                } to true
+            }
+}
 
 internal class ProgressionInfoBuilder(val context: Context) : IrElementVisitor<ProgressionInfo?, Nothing?> {
-
-    private val getIndicesFqName = FqName("kotlin.collections.<get-indices>")
-
-    private val untilFqName = FqName("kotlin.ranges.until")
-
-    private val stepFqName = FqName("kotlin.ranges.step")
-
-    private val downToFqName = FqName("kotlin.ranges.downTo")
-
-    private val rangeToName = Name.identifier("rangeTo")
 
     private val symbols = context.ir.symbols
 
     private val progressionElementClasses = symbols.integerClasses + symbols.char
 
-    private val indicesMatcher = createFunctionMatcher {
-        val supportedArrays = symbols.primitiveArrays.values + symbols.array
-        functionKind = IrFunctionMatcher.Kind.EXTENSION
-        receiverRestriction { it.type.classifierOrNull in supportedArrays }
-        fqNameRestriction { it == getIndicesFqName }
-        parametersSizeRestriction { it == 0 }
-    }
-
-    private val untilMatcher = createFunctionMatcher {
-        functionKind = IrFunctionMatcher.Kind.EXTENSION
-        receiverRestriction { it.type.classifierOrNull in progressionElementClasses }
-        parametersSizeRestriction { it == 1 }
-        parameterRestriction(0) { it.type.classifierOrNull in progressionElementClasses }
-        fqNameRestriction { it == untilFqName }
-    }
-
-    private val rangeToMatcher = createFunctionMatcher {
-        functionKind = IrFunctionMatcher.Kind.METHOD
-        receiverRestriction { it.type.classifierOrNull in progressionElementClasses }
-        fqNameRestriction { it.pathSegments().last() == rangeToName }
-        parametersSizeRestriction { it == 1 }
-        parameterRestriction(0) { it.type.classifierOrNull in progressionElementClasses }
-    }
-
-    private val downToMatcher = createFunctionMatcher {
-        functionKind = IrFunctionMatcher.Kind.EXTENSION
-        receiverRestriction { it.type.classifierOrNull in progressionElementClasses }
-        fqNameRestriction { it == downToFqName }
-        parametersSizeRestriction { it == 1 }
-        parameterRestriction(0) { it.type.classifierOrNull in progressionElementClasses }
-    }
-
-    private val stepMatcher = createFunctionMatcher {
-        functionKind = IrFunctionMatcher.Kind.EXTENSION
-        receiverRestriction { it.type.classifierOrNull in symbols.progressionClasses }
-        fqNameRestriction { it == stepFqName }
-        parametersSizeRestriction { it == 1 }
-        parameterRestriction(0) { it.type.isInt() || it.type.isLong() }
-    }
-
-    // TODO: Process constructors and other factory functions.
-    private val callHandlers = listOf(
-            indicesMatcher::match to ::buildIndices,
-            rangeToMatcher::match to ::buildRangeTo,
-            untilMatcher::match   to ::buildUntil,
-            downToMatcher::match  to ::buildDownTo,
-            stepMatcher::match    to ::buildStep
+    private val handlers = listOf(
+            IndicesHandler(context),
+            UntilHandler(progressionElementClasses),
+            DownToHandler(progressionElementClasses),
+            StepHandler(context, this),
+            RangeToHandler(progressionElementClasses)
     )
-
-    private fun handleCall(call: IrCall, progressionType: ProgressionType): ProgressionInfo? =
-            callHandlers.firstOrNull { (checker, _) ->
-                checker(call.symbol.owner)
-            }?.let { (_, builder) -> builder(call, progressionType) }
-
-    private fun buildIndices(expression: IrCall, progressionType: ProgressionType): ProgressionInfo? {
-        val int0 = IrConstImpl.int(expression.startOffset, expression.endOffset, context.irBuiltIns.intType, 0)
-
-        val bound = with(context.createIrBuilder(expression.symbol, expression.startOffset, expression.endOffset)) {
-            val clazz = expression.extensionReceiver!!.type.classifierOrFail
-            val symbol = symbols.arrayLastIndex[clazz] ?: return null
-            irCall(symbol).apply {
-                extensionReceiver = expression.extensionReceiver
-            }
-        }
-        return ProgressionInfo(progressionType, int0, bound)
-    }
-
-    private fun buildRangeTo(expression: IrCall, progressionType: ProgressionType) =
-            ProgressionInfo(progressionType,
-                    expression.dispatchReceiver!!,
-                    expression.getValueArgument(0)!!)
-
-    private fun buildUntil(expression: IrCall, progressionType: ProgressionType) =
-            ProgressionInfo(progressionType,
-                    expression.extensionReceiver!!,
-                    expression.getValueArgument(0)!!,
-                    closed = false)
-
-    private fun buildDownTo(expression: IrCall, progressionType: ProgressionType) =
-            ProgressionInfo(progressionType,
-                    expression.extensionReceiver!!,
-                    expression.getValueArgument(0)!!,
-                    increasing = false)
-
-    private fun buildStep(expression: IrCall, progressionType: ProgressionType) =
-            expression.extensionReceiver!!.accept(this, null)?.let {
-                val newStep = expression.getValueArgument(0)!!
-                val (newStepCheck, needBoundCalculation) = irCheckProgressionStep(progressionType, newStep)
-                // TODO: what if newStep == newStepCheck
-                val step = when (it.step) {
-                    null -> newStepCheck
-                    // There were step calls before. Just add our check in the container or create a new one.
-                    is IrStatementContainer -> {
-                        it.step.statements.add(newStepCheck)
-                        it.step
-                    }
-                    else -> IrCompositeImpl(expression.startOffset, expression.endOffset, newStep.type).apply {
-                        statements.add(it.step)
-                        statements.add(newStepCheck)
-                    }
-                }
-                ProgressionInfo(progressionType, it.first, it.bound, step, it.increasing, needBoundCalculation, it.closed)
-            }
-
-    private fun irCheckProgressionStep(progressionType: ProgressionType, step: IrExpression): Pair<IrExpression, Boolean> {
-        if (step is IrConst<*> &&
-                ((step.kind == IrConstKind.Long && step.value as Long > 0) ||
-                    (step.kind == IrConstKind.Int && step.value as Int > 0))) {
-            return step to !step.stepIsOne()
-        }
-        // The frontend checks if the step has a right type (Long for LongProgression and Int for {Int/Char}Progression)
-        // so there is no need to cast it.
-        assert(stepHasRightType(step, progressionType))
-
-        val symbol = symbols.checkProgressionStep[step.type.makeNotNull().toKotlinType()]
-                ?: throw IllegalArgumentException("No `checkProgressionStep` for type ${step.type}")
-        return IrCallImpl(step.startOffset, step.endOffset, symbol.owner.returnType, symbol).apply {
-            putValueArgument(0, step)
-        } to true
-    }
 
     private fun IrType.getProgressionType(): ProgressionType? = when {
         isSubtypeOf(symbols.charProgression.owner.defaultType) -> ProgressionType.CHAR_PROGRESSION
@@ -196,8 +197,9 @@ internal class ProgressionInfoBuilder(val context: Context) : IrElementVisitor<P
     override fun visitElement(element: IrElement, data: Nothing?): ProgressionInfo? = null
 
     override fun visitCall(expression: IrCall, data: Nothing?): ProgressionInfo? {
-        val progressionType = expression.type.getProgressionType() ?: return null
+        val progressionType = expression.type.getProgressionType()
+                ?: return null
 
-        return handleCall(expression, progressionType)
+        return handlers.firstNotNullResult { it.handle(expression, progressionType) }
     }
 }

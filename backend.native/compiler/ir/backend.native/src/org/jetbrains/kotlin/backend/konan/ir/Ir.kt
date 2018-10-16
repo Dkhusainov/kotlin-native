@@ -283,41 +283,16 @@ internal class KonanSymbols(context: Context, val symbolTable: SymbolTable, val 
 
     val arrayContentToString = arrays.associateBy(
             { it },
-            { findArrayExtension(it.descriptor, "contentToString", ExtensionKind.FUNCTION) }
+            { findArrayExtension(it.descriptor, "contentToString") }
     )
     val arrayContentHashCode = arrays.associateBy(
             { it },
-            { findArrayExtension(it.descriptor, "contentHashCode", ExtensionKind.FUNCTION) }
+            { findArrayExtension(it.descriptor, "contentHashCode") }
     )
 
-    // Arrays of unsigned primitives have not `lastIndex` extension.
-    val arrayLastIndex = (primitiveArrays.values + array).associateBy(
-            { it },
-            { findArrayExtension(it.descriptor, "lastIndex", ExtensionKind.PROPERTY_GETTER) }
-    )
-
-    enum class ExtensionKind {
-        FUNCTION,
-        PROPERTY_GETTER,
-        PROPERTY_SETTER;
-
-        fun filterScope(memberScope: MemberScope, name: String): Collection<FunctionDescriptor> {
-            val identifier = Name.identifier(name)
-            val location = NoLookupLocation.FROM_BACKEND
-            return when (this) {
-                FUNCTION -> memberScope.getContributedFunctions(identifier, location)
-                PROPERTY_GETTER -> memberScope.getContributedVariables(identifier, location)
-                        .mapNotNull { it.getter }
-                PROPERTY_SETTER -> memberScope.getContributedVariables(identifier, location)
-                        .mapNotNull { it.setter }
-            }
-        }
-    }
-
-    private fun findArrayExtension(descriptor: ClassDescriptor, name: String,
-                                   kind: ExtensionKind): IrSimpleFunctionSymbol {
-
-        val functionDescriptor = kind.filterScope(builtInsPackage("kotlin", "collections"), name)
+    private fun findArrayExtension(descriptor: ClassDescriptor, name: String): IrSimpleFunctionSymbol {
+        val functionDescriptor = builtInsPackage("kotlin", "collections")
+                .getContributedFunctions(Name.identifier(name), NoLookupLocation.FROM_BACKEND)
                 .singleOrNull {
                     it.valueParameters.isEmpty()
                             && it.extensionReceiverParameter?.type?.constructor?.declarationDescriptor == descriptor
@@ -325,7 +300,6 @@ internal class KonanSymbols(context: Context, val symbolTable: SymbolTable, val 
                 } ?: error(descriptor.toString())
         return symbolTable.referenceSimpleFunction(functionDescriptor)
     }
-
 
     override val copyRangeTo = arrays.map { symbol ->
         val packageViewDescriptor = builtIns.builtInsModule.getPackage(KotlinBuiltIns.COLLECTIONS_PACKAGE_FQ_NAME)
@@ -344,6 +318,15 @@ internal class KonanSymbols(context: Context, val symbolTable: SymbolTable, val 
     val arraySet = array.descriptor.unsubstitutedMemberScope
             .getContributedFunctions(Name.identifier("set"), NoLookupLocation.FROM_BACKEND)
             .single().let { symbolTable.referenceSimpleFunction(it) }
+
+    val arraySize = arrays.associateBy(
+            { it },
+            { it.descriptor.unsubstitutedMemberScope
+                    .getContributedVariables(Name.identifier("size"), NoLookupLocation.FROM_BACKEND)
+                    .single().let { symbolTable.referenceSimpleFunction(it.getter!!) } }
+    )
+
+
 
     val valuesForEnum = symbolTable.referenceSimpleFunction(
             context.getInternalFunctions("valuesForEnum").single())

@@ -3,110 +3,94 @@ package org.jetbrains.kotlin.backend.konan.lower.matchers
 import org.jetbrains.kotlin.backend.konan.irasdescriptors.fqNameSafe
 import org.jetbrains.kotlin.ir.declarations.IrFunction
 import org.jetbrains.kotlin.ir.declarations.IrValueParameter
+import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
+import org.jetbrains.kotlin.ir.types.classifierOrNull
 import org.jetbrains.kotlin.name.FqName
 
+internal interface IrFunctionRestriction : (IrFunction) -> Boolean
 
-internal inline fun createFunctionMatcher(restrictions: IrFunctionMatcher.() -> Unit): IrFunctionMatcher =
-        IrFunctionMatcher().apply(restrictions)
-
-data class ParameterRestriction(
+internal class ParameterRestriction(
         val index: Int,
         val restriction: (IrValueParameter) -> Boolean
-)
+) : IrFunctionRestriction {
 
-internal class IrFunctionMatcher(var functionKind: Kind = Kind.ANY) {
-
-    enum class Kind {
-        ANY,
-        NO_RECEIVER,
-        EXTENSION,
-        METHOD
-    }
-
-    private val receiverRestrictions = mutableListOf<(IrValueParameter) -> Boolean>()
-
-    private val parameterRestrictions = mutableListOf<ParameterRestriction>()
-
-    private val nameRestrictions = mutableListOf<(FqName) -> Boolean>()
-
-    private val paramCountRestrictions = mutableListOf<(Int) -> Boolean>()
-
-    fun fqNameRestriction(restriction: (FqName) -> Boolean) {
-        nameRestrictions += restriction
-    }
-
-    fun parameterRestriction(index: Int, restriction: (IrValueParameter) -> Boolean) {
-        parameterRestrictions += ParameterRestriction(index, restriction)
-    }
-
-    fun receiverRestriction(restriction: (IrValueParameter) -> Boolean) {
-        receiverRestrictions += restriction
-    }
-
-    fun parametersSizeRestriction(restriction: (Int) -> Boolean) {
-        paramCountRestrictions += restriction
-    }
-
-    fun match(function: IrFunction): Boolean {
+    override fun invoke(function: IrFunction): Boolean {
         val params = function.valueParameters
-
-        if (!matchReceiver(function)) return false
-
-        nameRestrictions.forEach {
-            if (!it(function.fqNameSafe)) {
-                return false
-            }
-        }
-        paramCountRestrictions.forEach {
-            if (!it(params.size)) {
-                return false
-            }
-        }
-        parameterRestrictions.forEach { (idx, match) ->
-            if (params.size <= idx || !match(params[idx])){
-                return false
-            }
-        }
-        return true
-    }
-
-    private fun matchReceiver(function: IrFunction): Boolean {
-
-        assert(functionKind != Kind.NO_RECEIVER || receiverRestrictions.isEmpty()) {
-            "Simple function shouldn't have any restrictions"
-        }
-
-        val receiver = when {
-            function.dispatchReceiverParameter != null -> function.dispatchReceiverParameter
-            function.extensionReceiverParameter != null -> function.extensionReceiverParameter
-            else -> null
-        }
-
-        return when (functionKind) {
-            Kind.ANY -> {
-                if (receiver == null) {
-                    receiverRestrictions.isEmpty()
-                } else {
-                    receiverRestrictions.all { it(receiver) }
-                }
-            }
-            Kind.NO_RECEIVER -> {
-                receiver == null
-            }
-            Kind.EXTENSION -> {
-                if (receiver == null) {
-                    false
-                } else {
-                    function.extensionReceiverParameter != null && receiverRestrictions.all { it(receiver) }
-                }
-            }
-            Kind.METHOD -> {
-                if (receiver == null) {
-                    false
-                } else {
-                    function.dispatchReceiverParameter != null && receiverRestrictions.all { it(receiver) }
-                }
-            }
-        }
+        return params.size > index && restriction(params[index])
     }
 }
+
+internal class DispatchReceiverRestriction(
+        val restriction: (IrValueParameter?) -> Boolean
+) : IrFunctionRestriction {
+
+    override fun invoke(function: IrFunction): Boolean {
+        return restriction(function.dispatchReceiverParameter)
+    }
+}
+
+internal class ExtensionReceiverRestriction(
+        val restriction: (IrValueParameter?) -> Boolean
+) : IrFunctionRestriction {
+
+    override fun invoke(function: IrFunction): Boolean {
+        return restriction(function.extensionReceiverParameter)
+    }
+}
+
+internal class ParameterCountRestriction(
+        val restriction: (Int) -> Boolean
+) : IrFunctionRestriction {
+
+    override fun invoke(function: IrFunction): Boolean {
+        return restriction(function.valueParameters.size)
+    }
+}
+
+internal class FqNameRestriction(
+        val restriction: (FqName) -> Boolean
+) : IrFunctionRestriction {
+
+    override fun invoke(function: IrFunction): Boolean {
+        return restriction(function.fqNameSafe)
+    }
+}
+
+internal open class IrFunctionRestrictionsContainer : IrFunctionRestriction {
+    private val restrictions = mutableListOf<IrFunctionRestriction>()
+
+    fun add(restriction: IrFunctionRestriction) {
+        restrictions += restriction
+    }
+
+    fun fqNameRestriction(restriction: (FqName) -> Boolean) =
+            add(FqNameRestriction(restriction))
+
+    fun parameterCountRestriction(restriction: (Int) -> Boolean) =
+            add(ParameterCountRestriction(restriction))
+
+    fun extensionReceiverRestriction(restriction: (IrValueParameter?) -> Boolean) =
+            add(ExtensionReceiverRestriction(restriction))
+
+    fun dispatchReceiverRestriction(restriction: (IrValueParameter?) -> Boolean) =
+            add(DispatchReceiverRestriction(restriction))
+
+    fun parameterRestriction(index: Int, restriction: (IrValueParameter) -> Boolean) =
+            add(ParameterRestriction(index, restriction))
+
+    override fun invoke(function: IrFunction) = restrictions.all { it(function) }
+}
+
+internal fun createIrFunctionRestrictions(restrictions: IrFunctionRestrictionsContainer.() -> Unit) =
+        IrFunctionRestrictionsContainer().apply(restrictions)
+
+internal fun IrFunctionRestrictionsContainer.singleArgumentExtension(
+        fqName: FqName,
+        classes: Collection<IrClassSymbol>
+): IrFunctionRestrictionsContainer {
+    extensionReceiverRestriction { it != null && it.type.classifierOrNull in classes }
+    parameterCountRestriction { it == 1 }
+    fqNameRestriction { it == fqName }
+    return this
+}
+
